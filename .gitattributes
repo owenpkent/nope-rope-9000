@@ -1,0 +1,12 @@
+# Normalize all text files to LF in the repo and in working trees.
+# Keeps Windows checkouts from triggering autocrlf warnings on every git op.
+* text=auto eol=lf
+
+# Common binaries (in case any get added later).
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.pdf binary
+*.zip binary
