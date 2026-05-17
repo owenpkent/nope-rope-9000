@@ -13,6 +13,7 @@ file, You can obtain one at http://mozilla.org/MPL/2.0/.
 // @description  Slither.io bot
 // @author       BlueCannonBall (aka OpTiMaL)
 // @match        *://*.slither.io/*
+// @match        *://*.slither.com/*
 // @grant        none
 // ==/UserScript==
 

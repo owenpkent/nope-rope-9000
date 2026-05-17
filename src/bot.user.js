@@ -5,6 +5,7 @@
 // @description  Slither.io bot, from-scratch build. See README.
 // @author       Owen
 // @match        *://*.slither.io/*
+// @match        *://*.slither.com/*
 // @grant        none
 // @run-at       document-end
 // ==/UserScript==
