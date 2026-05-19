@@ -35,6 +35,10 @@ models/
 *.swp
 .DS_Store
 Thumbs.db
+*.stackdump
+
+# Local agent / assistant state
+.claude/
 
 # Secrets
 .env
