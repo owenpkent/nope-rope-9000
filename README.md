@@ -29,14 +29,13 @@ nope-rope-9000/
   tests/
     smoke.spec.js                   # 30s sanity check; the only sandbox test still used
     bench.spec.js                   # 7-min 20-seed sandbox benchmark (demoted, see Status)
-    play.spec.js                    # automated real-game runs on slither.io with rolling screenshots
+    play.spec.js                    # automated real-game runs on slither.io
     probe-realgame.spec.js          # discovery probe: load slither.io, dump globals + selectors
     unit/
       geometry.test.js              # tests for src/lib/geometry.js (Node's built-in test runner)
       sync-check.test.js            # verifies bot.user.js helpers match the lib copy
   bench-history/                    # per-run archives (sandbox + realgame) for `bench-diff --against`
   bench-history.jsonl               # one-line-per-run summary log
-  play-deaths/                      # rolling per-game screenshots (gitignored)
 ```
 
 ## Develop offline (no slither.io connection needed)
@@ -162,11 +161,12 @@ Treat the bench like a unit test of the steering loop, not a benchmark.
 Drives [https://slither.io](https://slither.io) with the bot injected via
 `page.addInitScript`. Per game: clicks play via `window.connect()`,
 enables the bot, waits for `window.playing` to flip false (death), reads
-the run record from `nr9k.history()`, and takes a rolling buffer of
-death-frame screenshots (the bot's debug overlay is forced on so the
-screenshots show *what the bot was computing*: lethal/safe wedges, head
-ghosts, food target, chosen heading). Defaults: 15 games, 180s cap each,
-label `realgame`. Env vars:
+the run record from `nr9k.history()`. The aggregated stats (median
+peakLength, duration, kills) are the tuning signal; per-game
+`lastSnapshot` in `realgame-results.json` carries position, heading,
+food target, ghost count, and boost state at the death frame for any
+run worth digging into. Defaults: 15 games, 180s cap each, label
+`realgame`. Env vars:
 
 ```bash
 RUN_COUNT=15 RUN_TIMEOUT_S=300 PLAY_LABEL=mychange npm run play
@@ -203,11 +203,8 @@ Compare on `peakLengthLegacy` against any past run taken before
 3-5x the legacy number because slither's displayed length isn't the
 segment array count.)
 
-The screenshots in `play-deaths/<label>/run-N-tX.Xs.png` are *rolling
-buffer per game* — the last three frames before death, ~2s apart. Open
-them to see what was on the bot's screen as it died.
-
-**Steering algorithm.** Each tick (200 Hz, `setInterval` at 5 ms):
+**Steering algorithm.** Each tick (60 Hz, `setInterval` at ~16 ms; v0.6.0
+dropped from 200 Hz, see [CRITIQUE.md](./CRITIQUE.md)):
 
 1. Update head-position history per visible enemy snake and compute its
    velocity. Self-exclusion is by object identity. Runs whether or not
@@ -222,17 +219,23 @@ them to see what was on the bot's screen as it died.
    naturally homes on corpse piles (a dead snake leaves a dense ribbon
    of food at one angle), where single-food picking would pick whichever
    one pellet scores best in isolation.
-4. **Continuous TTC heading sampler** (the actual steering decision).
-   Build a pre-filtered list of nearby obstacles: enemy heads (each
-   with current position + velocity) and enemy body segments (treated
-   as static for the duration of the simulation). The bot's *own* body
-   is NOT included — in slither.io your own snake is pass-through.
-   Sample 32 candidate headings evenly around 360°. For each, simulate
-   1.2s of forward motion at the bot's current speed; for each obstacle,
-   solve the quadratic for first squared-distance equal to the safe
-   radius (head-to-head circle intersection). Take min across obstacles
-   — that's the heading's time-to-collision. Pick the heading with max
-   TTC; tie-break by smallest angular distance to the food target.
+4. **Substep TTC heading picker with own-arc kinematics** (the actual
+   steering decision; see [CRITIQUE.md](./CRITIQUE.md) for v0.5.2's
+   teleport-based version and why it was replaced). Build a pre-
+   filtered list of nearby obstacles: enemy heads (each with current
+   position + velocity), enemy body segments (each carrying their
+   parent head's velocity in v0.6.0), and curving ghosts of fast
+   enemies. The bot's *own* body is NOT included; in slither.io your
+   own snake is pass-through. Sample 32 candidate headings evenly
+   around 360°. For each, simulate a turn from the bot's current
+   heading toward the candidate at `cfg.botTurnRate` (~3 rad/s),
+   then linear motion at the candidate heading out to the 1.2 s
+   horizon. Closed-form arc position; substep check at 50 ms
+   intervals against obstacle positions that evolve linearly with
+   their tracked velocities. The score per candidate is
+   `ttc - foodWeight * foodOffset - inertiaWeight * inertiaOffset`
+   (food angle is no longer a tie-break, last tick's heading is an
+   inertia anchor). Pick max score.
 5. Boost gate: if TTC has 90%+ of the horizon (i.e. headed into clear
    space) AND the target food has `sz ≥ cfg.boostFoodSize` AND the
    chosen heading is within `cfg.boostMaxAngleDelta` of the food angle,
@@ -246,7 +249,7 @@ Step 3's 16 angle buckets are *also* computed each tick (along with
 [100, 200, 350, 550, 800] ms ahead under linear motion), but only for
 the debug overlay. The actual picker is the TTC sampler in step 4. The
 buckets are kept around because the visual diagnosis they provide is
-useful when looking at death screenshots, and because the next planned
+useful when interactively debugging, and because the next planned
 work (multi-hypothesis ghost prediction) builds on the ghost structure.
 
 `nr9k.state()` reports `trackedHeads`, `ghostsLastTick`, and `boosting`
@@ -255,7 +258,7 @@ slither's displayed length (NOT `s.pts.length` — see the metric note
 under Testing). `nr9k.summary()` returns median/max length and `sct`
 over recent runs; runs are recorded automatically each time the game
 ends and persisted to `localStorage`. For batch tuning prefer
-`npm run play` over by-hand summaries — same data, larger N, screenshots.
+`npm run play` over by-hand summaries: same data, larger N.
 
 ## Known gotchas
 
@@ -279,31 +282,42 @@ ends and persisted to `localStorage`. For batch tuning prefer
 
 ## Status
 
-v0.5.2-dev. 200 Hz steering tick. Continuous time-to-collision (TTC)
-heading picker added 2026-05-22 — replaces the bucketed run-finder for
-the actual steering decision. 32 candidate headings sampled around 360°;
-for each, ~1.2s of forward motion is simulated against enemy bodies
-(static) and enemy heads (linear motion); pick the heading with the
-longest TTC, food alignment as tie-breaker. The 16-wedge map is still
-computed each tick for the debug overlay (visual diagnosis), not for
-steering. Self-body avoidance was removed (slither's own body is
-pass-through). Boost only when TTC has slack and the food-distance/angle
-gates pass. Visual debug overlay on canvas (H to toggle); shows wedge
-clearances, ghost positions, food target, chosen heading, plus 32 TTC
-sample rays colored red→green by their TTC ratio.
+v0.6.2 (2026-05-22). Full design rationale in [CRITIQUE.md](./CRITIQUE.md). Ongoing research mill in [research/](./research/) (sources catalog and prioritized findings; see [research/FINDINGS.md](./research/FINDINGS.md)). What's in v0.6.x relative to v0.5.2:
+
+- **Own-arc kinematics in the TTC picker.** Each candidate heading simulates a turn from the current heading at `botTurnRate` (~3 rad/s) then linear motion to the 1.2 s horizon. Substep collision check at 50 ms intervals. Replaces the v0.5.2 teleport-to-heading assumption that underweighted large turns.
+- **60 Hz tick.** Down from 200 Hz. Slither's network frame rate makes faster than this wasted re-evaluation and was burning turn-rate budget via xm/ym oscillation.
+- **Two-stage lexicographic picker.** Max-safety wins absolutely; food and inertia tiebreak only within `foodSafetyBandS = 0.1` of the max. Slither has no starve mechanic so survival is never traded for food.
+- **DWA-style weighted safety score.** `safety = wMin * minTTC + wMean * meanTTC - wCritical * count(criticalTTC)`. Defaults preserve v0.6.1 min-TTC-only behavior (`wMean = 0, wCritical = 0`); flip weights to enable danger-shape sensitivity per CRITIQUE item 4. Sweep pending.
+- **Enemy body segments use per-segment tangent velocity.** Each segment moves toward the position of the segment ahead at the enemy's tracked speed. Captures both straight motion (degenerates to head velocity) and curving snakes (body lags head's turn, segments curve through their own path). Earlier static and rigid-head-velocity models both produced visible failure modes; tangent velocity is the principled fix.
+- **`nr9k.probe()` helper** with auto-fire on the first toggle-bot-on per game. Dumps `window.slither` and a representative enemy's key list plus presence checks for `sectors`, `preys`, `leaderboard`, `sp`, `wang`, `lnp`. Output appears in `npm run play` logs so we can tell which protocol-doc fields the modern build actually exposes.
+- **Debug overlay defaults to on** at `overlayScale = 0.5` so the radar wedges, TTC rays, ghost positions, food target, and chosen heading are visible during play without smothering the canvas. H key or `nr9k.overlay(false)` to hide.
+
+The 16-wedge map is still computed each tick for the debug overlay
+(visual diagnosis), not for steering. Self-body avoidance remains off
+(slither's own body is pass-through). Boost only when TTC has slack
+and the food-distance/angle gates pass. Visual debug overlay on canvas
+(H to toggle); shows wedge clearances, ghost positions, food target,
+chosen heading, plus 32 TTC sample rays colored red→green by their
+TTC ratio.
 
 **Real-game results** (n=15 per row, 2026-05-22):
 
 | Config | `peakLengthLegacy` | `peakLength` | duration | kills/15 | best run |
 | --- | ---: | ---: | ---: | ---: | --- |
 | baseline (wedge picker, no-self-body) | 33 | ~107 | 24-27s | 1-3 | L75 / 125s |
-| TTC picker | 32 | ~104 | 22.6s | 4 | L98 / 39.9s (real length 1378) |
-| **TTC + curving ghosts** | **35** | **157** | **30.3s** | 0 | L39 / 48.5s |
+| TTC picker (teleport, food tiebreak) | 32 | ~104 | 22.6s | 4 | L98 / 39.9s (real length 1378) |
+| TTC + curving ghosts | 35 | 157 | 30.3s | 0 | L39 / 48.5s |
+| v0.6.0 (own-arc + food cost) | 34 | 170 | 26.4s | 0 | L420 / 68s |
+| v0.6.1 (lexicographic + 100ms tiebreak band) | 37 | 181 | 28.4s | 0 | L596 / 50s |
+| v0.6.2-defaults-v1 | 38 | 299 | 26.4s | 2 | L1102 / 38s |
+| v0.6.2-defaults-v2 | 30 | 126 | 23.9s | 0 | (smaller batch) |
 
-**Tuning status:** TTC + multi-hypothesis curving ghosts is the
-nominal best at n=15 (+6s median duration, +47% real length over
-baseline). Two follow-up attempts to upgrade body collision modeling
-both regressed by 6-7s median duration:
+Three n=15 batches of the same picker (v0.6.1 and the two v0.6.2-defaults runs, which are byte-equivalent given default weights) span medianPeakLength 126 to 299. **n=15 is at the noise floor.** Real comparisons need n=25+ before reading any single batch as signal.
+
+**Tuning status:** v0.6.0 lands all three of CRITIQUE.md items 1-3 in
+one batch. Needs an n=15 real-game run to know whether it beats the
+curving-ghosts row. Two earlier follow-up attempts to upgrade body
+collision modeling both regressed by 6-7s median duration:
 
 - `body-capsules`: full capsule (line-segment with radius) collision
   between consecutive `pts[i]` and `pts[i+1]`. Geometrically the right
@@ -323,10 +337,10 @@ is provisional.
 
 **Overlay positioning fix (2026-05-22):** the debug overlay was pinned
 at document (0, 0), but slither's main canvas `mc` is often offset by
-its container's CSS — so the radar wedges and TTC rays could drift up
-to ~150 px from the rendered snake head, making screenshots hard to
-interpret. `syncOverlaySize` now positions the overlay over `mc`'s
-`getBoundingClientRect()`. Diagnostic only; doesn't affect steering.
+its container's CSS, so the radar wedges and TTC rays could drift up
+to ~150 px from the rendered snake head. `syncOverlaySize` now
+positions the overlay over `mc`'s `getBoundingClientRect()`.
+Diagnostic only; doesn't affect steering.
 
 The TTC picker alone produced the largest single run on record (real
 length 1378) but bimodal outcomes (godlike or instant-death). Adding
@@ -404,7 +418,7 @@ locking in.
 
 - ~~**Headless harness.**~~ Built: Playwright `npm run bench` for the
   sandbox and `npm run play` for the real game. Per-run history
-  archived to `bench-history/`. Death-frame screenshots captured.
+  archived to `bench-history/`.
 - ~~**Sandbox parity.**~~ Not done in the sense originally intended;
   the sandbox now demoted to regression-only because it's
   unrepresentative even when wired up (no corpse piles, no real

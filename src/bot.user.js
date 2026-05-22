@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         nope-rope-9000
 // @namespace    https://github.com/owenpkent/nope-rope-9000
-// @version      0.5.2
+// @version      0.6.2
 // @description  Slither.io bot, from-scratch build. See README.
 // @author       Owen
 // @match        *://*.slither.io/*
@@ -16,11 +16,15 @@
   const TAG = '[nope-rope-9000]';
   const log = (...args) => console.log(TAG, ...args);
 
-  log('loaded, version 0.5.2');
+  log('loaded, version 0.6.2');
 
   // ---- Tunables ----------------------------------------------------------
   const CFG = {
-    tickHz: 200,
+    // 200 Hz was theater: slither's physics updates at ~30 Hz and the
+    // resulting micro-oscillation in xm/ym was burning turn-rate budget.
+    // 60 Hz matches typical browser frame pacing and leaves headroom
+    // for the substep TTC simulation below.
+    tickHz: 60,
     nickDefault: 'nope-rope',
     foodSearchRadius: 1500,
     // Angle quantization shared by steering and food. 16 buckets = ~22.5 deg
@@ -51,6 +55,30 @@
     // 1-bucket open arc directly at food. Without that, the bot dives into
     // narrow cracks that close on it.
     runWidthWeight: 4,
+    // TTC picker scoring. Two-stage lexicographic: maximum safety
+    // score first (see DWA-style weights below), then food alignment
+    // (and inertia) as tiebreakers among candidates within
+    // foodSafetyBandS of the max. Slither has no starve mechanic, so
+    // food is pure upside; survival must never be traded for it.
+    foodSafetyBandS: 0.1,
+    // Inertia tiebreak weight, applied alongside food alignment within
+    // the safety band. Low because it is meant to break ties, not steer.
+    inertiaWeight: 0.1,
+    // DWA-style safety score weights. Score is:
+    //   safety = wMin * minTTC + wMean * meanTTC - wCritical * critCount
+    // wMean and wCritical default to 0, so out-of-the-box behavior is
+    // identical to v0.6.1 (pure min-TTC). Flip wMean and wCritical to
+    // non-zero to bring in the shape of the danger field: a heading
+    // with one obstacle near TTC=1.1 should beat one with thirty.
+    // Suggested first-pass: wMean = 0.3, wCritical = 0.2, danger 0.3 s.
+    safetyWeightMin: 1.0,
+    safetyWeightMean: 0.0,
+    safetyWeightCritical: 0.0,
+    safetyDangerThreshold: 0.3,
+    // Assumed bot turn rate for the own-arc kinematic model in the TTC
+    // picker. Roughly matches observed slither head behavior; the
+    // picker is not very sensitive to this within +/- 50%.
+    botTurnRate: 3.0,
     // Boost gating
     boostFoodSize: 25,           // sz threshold to consider boosting
     boostClearanceMargin: 1.6,   // clearance toward food must exceed foodDist * this
@@ -60,6 +88,12 @@
     historyKey: 'nr9k_history',
     // Debug overlay
     overlayKey: 'nr9k_overlay',
+    // Visual scale for the overlay. 1.0 = wedges/rays drawn at their
+    // true world-scaled radii. 0.5 shrinks the entire radar uniformly
+    // around the snake head; useful when the full-size overlay covers
+    // too much of the play area. Diagnostic only; does not affect
+    // steering decisions.
+    overlayScale: 0.5,
   };
 
   // ---- IPv6 fast-fail + observability ------------------------------------
@@ -531,12 +565,23 @@
           });
         }
       }
-      // Enemy body segments as discrete static points. Two attempts to
-      // upgrade this (full capsules, then targeted midpoint interpolation)
-      // both regressed median duration by 6-7s at n=15. Possibly compute
-      // budget at 200Hz, possibly false positives from over-precise body
-      // coverage, possibly noise. Sticking with the discrete-point
-      // baseline until we have a way to test more robustly.
+      // Enemy body segments as discrete points with per-segment
+      // tangent velocity. Slither's body is a chain that follows the
+      // head's traced path; segment j's instantaneous motion is along
+      // the direction (pts[j-1] - pts[j]) at the enemy's speed.
+      //
+      // Earlier iterations treated bodies as either static (which
+      // false-positived where the tail had already moved on) or rigid
+      // head-velocity translation (which false-negatived for big
+      // curving snakes: the model said the body swept with the head's
+      // new direction, but reality is the body lags the head's turn,
+      // so the bot dodged into a body that didn't actually move out
+      // of the way). Per-segment tangent gets both regimes right:
+      // straight snake -> every segment's tangent is the head heading
+      // (identical to head velocity); curving snake -> each segment
+      // moves along the local body curve, not where the head is now.
+      const headVel = velByOther.get(other);
+      const enemySpeed = headVel ? headVel.speed : 0;
       const pts = other.pts;
       if (pts) {
         for (let j = 0; j < pts.length; j++) {
@@ -545,7 +590,24 @@
           const dx = p.xx - s.xx;
           const dy = p.yy - s.yy;
           if (dx * dx + dy * dy > reach2) continue;
-          out.push({ dx, dy, ovx: 0, ovy: 0, safeR2 });
+          let segVx = 0, segVy = 0;
+          if (enemySpeed > 0) {
+            // For j=0 the "segment ahead" is the head itself. For
+            // j>0 it is pts[j-1]. Either way we walk from the
+            // current segment toward the one ahead in the chain.
+            const aheadX = j === 0 ? other.xx : pts[j - 1] && pts[j - 1].xx;
+            const aheadY = j === 0 ? other.yy : pts[j - 1] && pts[j - 1].yy;
+            if (typeof aheadX === 'number' && typeof aheadY === 'number') {
+              const tdx = aheadX - p.xx;
+              const tdy = aheadY - p.yy;
+              const tlen = Math.sqrt(tdx * tdx + tdy * tdy);
+              if (tlen > 1e-6) {
+                segVx = (tdx / tlen) * enemySpeed;
+                segVy = (tdy / tlen) * enemySpeed;
+              }
+            }
+          }
+          out.push({ dx, dy, ovx: segVx, ovy: segVy, safeR2 });
         }
       }
 
@@ -581,65 +643,239 @@
     return out;
   }
 
-  // For each of SAMPLE_COUNT candidate headings, compute min time-to-
-  // collision. Pick the heading with the largest TTC. Tie-break by
-  // smallest angular distance to the food target.
+  // Substep-simulated TTC picker with own-arc kinematics and a
+  // continuous score function. See CRITIQUE.md for the rationale.
+  //
+  // For each of TTC_SAMPLES candidate headings, simulate a turn from
+  // the current heading toward the candidate at CFG.botTurnRate, then
+  // straight-line motion at the candidate heading. Position along the
+  // arc is closed-form (integrated sin/cos). Obstacles evolve linearly
+  // with their tracked velocities; we sample bot vs. obstacle distance
+  // every SUBSTEP_DT seconds and call it a hit when squared distance
+  // first falls below the obstacle's safeR2. The substep grid is
+  // coarse (50 ms) so TTC resolution is +/- 50 ms; that is well below
+  // both the scoring epsilons and the 10 ms food-tiebreak threshold
+  // the old picker used.
+  //
+  // Score is `ttc - foodWeight * foodOffset - inertiaWeight * inertiaOffset`.
+  // Food is no longer a tie-break: small misalignments cost real TTC
+  // budget, so the bot will choose a slightly-less-safe heading that
+  // actually points at the food. Inertia term keeps the picker from
+  // oscillating between near-equal candidates.
   const TTC_SAMPLES = 32;
   const TTC_HORIZON_S = 1.2;
+  const SUBSTEP_DT = 0.05;
+  const NUM_SUBSTEPS = Math.ceil(TTC_HORIZON_S / SUBSTEP_DT);
+
+  let lastChosenHeading = null;
+
   function pickHeadingTTC(s, velocities, foodTarget) {
     const mySpeed = estimateOwnSpeed(s, velocities);
+    const turnRate = CFG.botTurnRate;
+    const currentHeading = typeof s.ang === 'number' ? s.ang : 0;
     const nearby = buildNearbyObstacles(s, velocities, TTC_HORIZON_S, mySpeed);
     const foodAng = foodTarget
       ? Math.atan2(foodTarget.yy - s.yy, foodTarget.xx - s.xx)
       : null;
 
-    let bestTTC = -1;
-    let bestAng = typeof s.ang === 'number' ? s.ang : 0;
-    let bestFoodOffset = Infinity;
     const ttcByIndex = new Array(TTC_SAMPLES);
+    const safetyByIndex = new Array(TTC_SAMPLES);
+    const thetaByIndex = new Array(TTC_SAMPLES);
+    let maxSafety = -Infinity;
+    // Per-obstacle TTC scratch, reused across candidates to avoid
+    // per-candidate allocation churn.
+    const obstacleTTCs = nearby.length > 0 ? new Array(nearby.length) : null;
 
+    // Pass 1: simulate each candidate; compute DWA-style weighted safety
+    // score from per-obstacle TTCs. The substep loop tracks min-TTC for
+    // legacy semantics and overlay color, plus the full per-obstacle TTC
+    // vector for mean and critical-count aggregations. Default weights
+    // (wMean=0, wCritical=0) preserve v0.6.1 min-TTC-only behavior.
     for (let k = 0; k < TTC_SAMPLES; k++) {
       const theta = (k / TTC_SAMPLES) * TAU;
-      const myVx = Math.cos(theta) * mySpeed;
-      const myVy = Math.sin(theta) * mySpeed;
-      let ttc = TTC_HORIZON_S;
-      for (let i = 0; i < nearby.length; i++) {
-        const o = nearby[i];
-        let t;
-        if (o.type === 'capsule') {
-          t = firstHitCapsuleTime(o.dx1, o.dy1, o.dx2, o.dy2, myVx, myVy, o.safeR);
-        } else {
-          t = firstHitTime(
-            o.dx, o.dy,
-            o.ovx - myVx, o.ovy - myVy,
-            o.safeR2
-          );
-        }
-        if (t < ttc) {
-          ttc = t;
-          if (ttc <= 0) break;
-        }
+      thetaByIndex[k] = theta;
+      const dHeading = angleBetween(currentHeading, theta);
+      const absDHeading = Math.abs(dHeading);
+      const turnDir = dHeading >= 0 ? 1 : -1;
+      const omegaSigned = turnDir * turnRate;
+      const tTurn = absDHeading / turnRate;
+
+      // Arc endpoint: where the bot is when the turn completes. After
+      // that the bot moves linearly at heading theta.
+      let xAtTurn = 0, yAtTurn = 0;
+      if (absDHeading > 1e-6) {
+        xAtTurn = (mySpeed / omegaSigned) * (Math.sin(currentHeading + dHeading) - Math.sin(currentHeading));
+        yAtTurn = (mySpeed / omegaSigned) * (-Math.cos(currentHeading + dHeading) + Math.cos(currentHeading));
       }
-      ttcByIndex[k] = ttc;
+      const cosTheta = Math.cos(theta);
+      const sinTheta = Math.sin(theta);
+
+      if (obstacleTTCs) {
+        for (let i = 0; i < nearby.length; i++) obstacleTTCs[i] = TTC_HORIZON_S;
+      }
+      let minTTC = TTC_HORIZON_S;
+      // step=0 catches "already inside an obstacle" at the start.
+      for (let step = 0; step <= NUM_SUBSTEPS; step++) {
+        const t = step * SUBSTEP_DT;
+        let myX, myY;
+        if (t <= tTurn) {
+          // Still turning. Closed-form arc position from t=0.
+          if (absDHeading > 1e-6) {
+            myX = (mySpeed / omegaSigned) * (Math.sin(currentHeading + omegaSigned * t) - Math.sin(currentHeading));
+            myY = (mySpeed / omegaSigned) * (-Math.cos(currentHeading + omegaSigned * t) + Math.cos(currentHeading));
+          } else {
+            // Heading change is essentially zero. Treat as linear.
+            myX = cosTheta * mySpeed * t;
+            myY = sinTheta * mySpeed * t;
+          }
+        } else {
+          // Turn complete. Linear from arc endpoint at heading theta.
+          const dt = t - tTurn;
+          myX = xAtTurn + cosTheta * mySpeed * dt;
+          myY = yAtTurn + sinTheta * mySpeed * dt;
+        }
+
+        if (obstacleTTCs) {
+          for (let i = 0; i < nearby.length; i++) {
+            if (obstacleTTCs[i] < TTC_HORIZON_S) continue;
+            const o = nearby[i];
+            const ox = o.dx + o.ovx * t;
+            const oy = o.dy + o.ovy * t;
+            const dx = myX - ox;
+            const dy = myY - oy;
+            if (dx * dx + dy * dy <= o.safeR2) {
+              obstacleTTCs[i] = t;
+              if (t < minTTC) minTTC = t;
+            }
+          }
+        }
+        // If already inside an obstacle, no point integrating further;
+        // the candidate is already dead per the lexicographic order.
+        if (minTTC <= 0) break;
+      }
+
+      let safety;
+      if (obstacleTTCs && nearby.length > 0) {
+        let sumTTC = 0;
+        let criticalCount = 0;
+        for (let i = 0; i < nearby.length; i++) {
+          const t = obstacleTTCs[i];
+          sumTTC += t;
+          if (t < CFG.safetyDangerThreshold) criticalCount++;
+        }
+        const meanTTC = sumTTC / nearby.length;
+        safety = CFG.safetyWeightMin * minTTC
+               + CFG.safetyWeightMean * meanTTC
+               - CFG.safetyWeightCritical * criticalCount;
+      } else {
+        // No obstacles in range: max-safety is just the weighted horizon.
+        safety = CFG.safetyWeightMin * TTC_HORIZON_S
+               + CFG.safetyWeightMean * TTC_HORIZON_S;
+      }
+      ttcByIndex[k] = minTTC;
+      safetyByIndex[k] = safety;
+      if (safety > maxSafety) maxSafety = safety;
+    }
+
+    // Pass 2: among candidates within foodSafetyBandS of maxSafety,
+    // pick the one with the lowest tiebreak cost (food alignment plus
+    // inertia). Tiebreak cost has no impact on which candidates enter
+    // the band, so food can never push the picker into a less-safe
+    // candidate. Slither has no starve, so this is the correct shape:
+    // survive first, then aim at food. Band units are score-units,
+    // which equal seconds when only wMin is non-zero (default).
+    const safetyThreshold = maxSafety - CFG.foodSafetyBandS;
+    let bestAng = lastChosenHeading != null ? lastChosenHeading : currentHeading;
+    let bestTTC = -1;
+    let bestCost = Infinity;
+    for (let k = 0; k < TTC_SAMPLES; k++) {
+      const safety = safetyByIndex[k];
+      if (safety < safetyThreshold) continue;
+      const theta = thetaByIndex[k];
       const foodOffset = foodAng === null ? 0 : Math.abs(angleBetween(theta, foodAng));
-      // Compare on TTC; tie-break by smaller food offset.
-      if (
-        ttc > bestTTC + 0.01 ||
-        (Math.abs(ttc - bestTTC) <= 0.01 && foodOffset < bestFoodOffset)
-      ) {
-        bestTTC = ttc;
+      const inertiaOffset = lastChosenHeading === null
+        ? 0
+        : Math.abs(angleBetween(theta, lastChosenHeading));
+      const cost = foodOffset + CFG.inertiaWeight * inertiaOffset;
+      if (cost < bestCost) {
+        bestCost = cost;
         bestAng = theta;
-        bestFoodOffset = foodOffset;
+        bestTTC = ttcByIndex[k];
       }
     }
+    if (bestTTC < 0) bestTTC = ttcByIndex[0] || 0;
+
+    lastChosenHeading = bestAng;
     return {
       angle: bestAng,
       ttc: bestTTC,
-      blocked: bestTTC <= 0.05, // less than 50ms — we're basically dead
+      blocked: bestTTC <= 0.05, // less than 50 ms, basically dead
       obstacleCount: nearby.length,
       ttcByIndex,
     };
   }
+
+  function resetSteeringMemory() {
+    lastChosenHeading = null;
+  }
+
+  // ---- Game-state probe --------------------------------------------------
+  // Dumps the field shape of window.slither and a representative enemy plus
+  // a presence check for globals we don't currently read. Used to confirm
+  // which protocol-doc fields (sp, wang, ehang, lnp, fx, fy, alive_amt,
+  // boost, ...) the live build actually exposes today, so we can build on
+  // them instead of assuming. See research/FINDINGS.md item 1.
+  function probe() {
+    const out = {
+      version: '0.6.2',
+      slitherKeys: window.slither ? Object.keys(window.slither).sort() : null,
+      enemyKeys: null,
+      suspectFields: null,
+      globals: {
+        slither: !!window.slither,
+        slithers: Array.isArray(window.slithers) ? window.slithers.length : null,
+        foods: Array.isArray(window.foods) ? window.foods.length : null,
+        preys: Array.isArray(window.preys) ? window.preys.length : null,
+        sectors: Array.isArray(window.sectors) ? window.sectors.length : (typeof window.sectors),
+        sector_size: typeof window.sector_size === 'number' ? window.sector_size : null,
+        grd: typeof window.grd === 'number' ? window.grd : null,
+        gsc: typeof window.gsc === 'number' ? window.gsc : null,
+        view_xx: typeof window.view_xx === 'number',
+        view_yy: typeof window.view_yy === 'number',
+        leaderboard: Array.isArray(window.leaderboard) ? window.leaderboard.length : (Array.isArray(window.lbs) ? window.lbs.length : null),
+        setAcceleration: typeof window.setAcceleration === 'function',
+        forceServer: typeof window.forceServer === 'function',
+        fpsls: Array.isArray(window.fpsls) ? window.fpsls.length : null,
+        fmlts: Array.isArray(window.fmlts) ? window.fmlts.length : null,
+      },
+    };
+    if (Array.isArray(window.slithers)) {
+      const enemy = window.slithers.find(o => o && o !== window.slither);
+      if (enemy) {
+        out.enemyKeys = Object.keys(enemy).sort();
+        // Spot-check the high-value fields the protocol docs name. typeof
+        // returns 'undefined' if the field is gone; 'number' / 'object'
+        // confirms it. This is the fastest way to know what we can read
+        // server-truth instead of estimating.
+        out.suspectFields = {
+          sp: typeof enemy.sp,           // speed (server-truth)
+          wang: typeof enemy.wang,       // wanted angle (intent)
+          ehang: typeof enemy.ehang,     // eye-heading angle
+          tsp: typeof enemy.tsp,         // target speed
+          alive_amt: typeof enemy.alive_amt,
+          lnp: typeof enemy.lnp,         // last neck point
+          fx: typeof enemy.fx,
+          fy: typeof enemy.fy,
+          boost: typeof enemy.boost,
+          fam: typeof enemy.fam,
+          sct: typeof enemy.sct,
+        };
+      }
+    }
+    log('probe:', JSON.stringify(out));
+    return out;
+  }
+  let hasProbed = false;
 
   // ---- Wall avoidance ----------------------------------------------------
   function applyWallSteering(s, heading) {
@@ -771,8 +1007,15 @@
   // camera lag we ignore.
   let overlayCanvas = null;
   let overlayCtx = null;
+  // Overlay defaults to ON. Respects an explicit '0' in localStorage if the
+  // user has toggled it off (H key or nr9k.overlay(false)). Drawn at
+  // CFG.overlayScale (default 0.5) so it's visible without smothering the
+  // play area.
   let overlayEnabled = (() => {
-    try { return localStorage.getItem(CFG.overlayKey) === '1'; } catch (e) { return false; }
+    try {
+      const v = localStorage.getItem(CFG.overlayKey);
+      return v === null ? true : v === '1';
+    } catch (e) { return true; }
   })();
   let lastDebugState = null;
 
@@ -833,6 +1076,8 @@
     overlayCtx.clearRect(0, 0, overlayCanvas.width, overlayCanvas.height);
     if (!s || !lastDebugState) return;
     const gsc = typeof window.gsc === 'number' ? window.gsc : 1;
+    const scl = typeof CFG.overlayScale === 'number' ? CFG.overlayScale : 1;
+    const gscS = gsc * scl;
     const [hx, hy] = worldToScreen(s, s.xx, s.yy);
     const n = CFG.bucketCount;
     const { collision, headClearance, dangerThreshold, headDanger, projectDist } = lastDebugState.buckets;
@@ -847,7 +1092,7 @@
       const aEnd = aStart + bucketRad;
       overlayCtx.beginPath();
       overlayCtx.moveTo(hx, hy);
-      overlayCtx.arc(hx, hy, d * gsc, aStart, aEnd);
+      overlayCtx.arc(hx, hy, d * gscS, aStart, aEnd);
       overlayCtx.closePath();
       const fill = lethal ? 'rgba(255,60,60,0.28)' : warn ? 'rgba(240,200,40,0.22)' : 'rgba(80,220,120,0.12)';
       const stroke = lethal ? 'rgba(255,60,60,0.7)' : warn ? 'rgba(240,200,40,0.6)' : 'rgba(80,220,120,0.45)';
@@ -861,23 +1106,29 @@
     overlayCtx.strokeStyle = 'rgba(255,80,80,0.4)';
     overlayCtx.lineWidth = 1;
     overlayCtx.beginPath();
-    overlayCtx.arc(hx, hy, dangerThreshold * gsc, 0, TAU);
+    overlayCtx.arc(hx, hy, dangerThreshold * gscS, 0, TAU);
     overlayCtx.stroke();
     if (lastDebugState.ghosts) {
       overlayCtx.fillStyle = 'rgba(220,80,220,0.9)';
       for (const g of lastDebugState.ghosts) {
         const [gx, gy] = worldToScreen(s, g.xx, g.yy);
+        // Pull world-anchored markers in toward the snake by overlayScale
+        // so they stay consistent with the shrunk wedges.
+        const sx = hx + (gx - hx) * scl;
+        const sy = hy + (gy - hy) * scl;
         overlayCtx.beginPath();
-        overlayCtx.arc(gx, gy, 3, 0, TAU);
+        overlayCtx.arc(sx, sy, 3, 0, TAU);
         overlayCtx.fill();
       }
     }
     if (lastDebugState.foodTarget) {
       const [fx, fy] = worldToScreen(s, lastDebugState.foodTarget.xx, lastDebugState.foodTarget.yy);
+      const sx = hx + (fx - hx) * scl;
+      const sy = hy + (fy - hy) * scl;
       overlayCtx.strokeStyle = 'rgba(255,200,40,0.9)';
       overlayCtx.lineWidth = 2;
       overlayCtx.beginPath();
-      overlayCtx.arc(fx, fy, 8, 0, TAU);
+      overlayCtx.arc(sx, sy, 8, 0, TAU);
       overlayCtx.stroke();
     }
     // TTC sample rays. Each candidate heading drawn as a line whose
@@ -886,7 +1137,7 @@
     // for ~0 (about to die that way), green for full horizon.
     if (Array.isArray(lastDebugState.ttcByIndex)) {
       const samples = lastDebugState.ttcByIndex;
-      const maxRayLen = projectDist * gsc * 0.95;
+      const maxRayLen = projectDist * gscS * 0.95;
       for (let k = 0; k < samples.length; k++) {
         const ttc = samples[k];
         const ratio = Math.max(0, Math.min(1, ttc / TTC_HORIZON_S));
@@ -906,7 +1157,7 @@
       }
     }
     if (typeof lastDebugState.heading === 'number') {
-      const len = projectDist * gsc;
+      const len = projectDist * gscS;
       const ex = hx + Math.cos(lastDebugState.heading) * len;
       const ey = hy + Math.sin(lastDebugState.heading) * len;
       overlayCtx.strokeStyle = lastDebugState.boosting ? 'rgba(255,80,80,0.9)' : 'rgba(120,255,140,0.95)';
@@ -942,11 +1193,16 @@
     const playingNow = !!window.playing;
     const s = getSnake();
     if (playingNow && s && typeof s.xx === 'number') {
-      if (!wasPlaying) currentRun = null;
+      if (!wasPlaying) {
+        currentRun = null;
+        resetSteeringMemory();
+        hasProbed = false; // re-probe on each new game so we see field shape per-session
+      }
       wasPlaying = true;
     } else if (wasPlaying) {
       finalizeRun();
       setBoost(false);
+      resetSteeringMemory();
       wasPlaying = false;
     }
     if (!botEnabled || !playingNow || !s || typeof s.xx !== 'number') return;
@@ -998,7 +1254,17 @@
   // ---- Toggles -----------------------------------------------------------
   function toggleBot(val) {
     botEnabled = typeof val === 'boolean' ? val : !botEnabled;
-    if (!botEnabled) setBoost(false);
+    if (!botEnabled) {
+      setBoost(false);
+      resetSteeringMemory();
+    } else if (!hasProbed) {
+      // Fire the state probe at the moment the bot is enabled, not
+      // gated on a particular tick / snake count. Try/catch so a
+      // throw inside Object.keys or JSON.stringify gets surfaced
+      // instead of silently disabling probe forever.
+      try { probe(); } catch (e) { log('probe threw:', e && e.message || e); }
+      hasProbed = true;
+    }
     log('bot', botEnabled ? 'enabled' : 'disabled');
   }
   function toggleOverlay(val) {
@@ -1083,6 +1349,7 @@
     sockets: () => seenSocketUrls.slice(),
     blocked: () => blockedSocketUrls.slice(),
     fetches: () => seenFetchUrls.slice(),
+    probe: () => probe(),
     findFoods: () => {
       const hits = Object.entries(window).filter(([k, v]) => {
         if (!Array.isArray(v) || v.length === 0) return false;

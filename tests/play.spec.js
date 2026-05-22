@@ -22,8 +22,6 @@ const BOT_PATH = path.resolve(__dirname, '..', 'src', 'bot.user.js');
 const TARGET_URL = process.env.TARGET_URL || 'https://slither.io';
 const RUN_COUNT = parseInt(process.env.RUN_COUNT || '15', 10);
 const RUN_TIMEOUT_MS = parseInt(process.env.RUN_TIMEOUT_S || '180', 10) * 1000;
-const SHOT_INTERVAL_MS = 2000;
-const SHOT_BUFFER_SIZE = 3;
 const NICK = process.env.NICK || 'nope-rope';
 const LABEL = (process.env.PLAY_LABEL || 'realgame').replace(/[^a-zA-Z0-9_-]/g, '-');
 
@@ -89,48 +87,19 @@ test('automated slither.io play loop', async ({ page }) => {
     }
 
     console.log('  game started, enabling bot');
-    await page.evaluate(() => {
-      window.nr9k.toggle(true);
-      // Force the debug overlay on so death screenshots show what the bot
-      // was actually computing: lethal/warn arcs, head ghosts, food target,
-      // chosen heading. Without this, screenshots are just gameplay frames
-      // with no insight into the bot's decision state.
-      window.nr9k.overlay(true);
-    });
+    await page.evaluate(() => window.nr9k.toggle(true));
 
-    // Wait for death or timeout via polling, capturing rolling screenshots.
-    // window.playing flipping false comes AFTER the game's death animation
-    // starts, so a single screenshot taken at that point only shows the
-    // post-death menu. Instead we shoot every SHOT_INTERVAL_MS and keep
-    // only the most recent SHOT_BUFFER_SIZE files — when the loop exits,
-    // those are the last few frames before death.
-    const shotDir = path.resolve(__dirname, '..', 'play-deaths', LABEL);
-    fs.mkdirSync(shotDir, { recursive: true });
+    // Wait for death or timeout. The bot writes a full run record to
+    // localStorage when window.playing flips false (see snapshotRun /
+    // finalizeRun in src/bot.user.js), so polling is the only thing
+    // we need to do here.
     const startedAt = Date.now();
     let died = false;
-    const shotBuffer = [];
-    let nextShotAt = startedAt + SHOT_INTERVAL_MS;
-
     while (Date.now() - startedAt < RUN_TIMEOUT_MS) {
       const stillPlaying = await page.evaluate(() => window.playing);
       if (!stillPlaying) {
         died = true;
         break;
-      }
-      if (Date.now() >= nextShotAt) {
-        const ageS = ((Date.now() - startedAt) / 1000).toFixed(1);
-        const shotFile = path.join(shotDir, `run-${i + 1}-t${ageS}s.png`);
-        try {
-          await page.screenshot({ path: shotFile, fullPage: false });
-          shotBuffer.push(shotFile);
-          while (shotBuffer.length > SHOT_BUFFER_SIZE) {
-            const old = shotBuffer.shift();
-            try { fs.unlinkSync(old); } catch (e) {}
-          }
-        } catch (e) {
-          // Page may be transitioning; skip this tick.
-        }
-        nextShotAt = Date.now() + SHOT_INTERVAL_MS;
       }
       await page.waitForTimeout(200);
     }

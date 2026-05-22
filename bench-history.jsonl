@@ -13,3 +13,7 @@
 {"timestamp":"2026-05-22T21:28:39.988Z","label":"realgame-curve-ghosts","source":"realgame","runCount":15,"medianPeakLength":157,"medianPeakSct":11,"medianDurationS":30.291,"medianKills":0,"timeouts":0}
 {"timestamp":"2026-05-22T21:48:13.909Z","label":"realgame-body-capsules","source":"realgame","runCount":15,"medianPeakLength":134,"medianPeakSct":10,"medianDurationS":24.208,"medianKills":0,"timeouts":0}
 {"timestamp":"2026-05-22T22:01:53.181Z","label":"realgame-body-interp","source":"realgame","runCount":15,"medianPeakLength":101,"medianPeakSct":7,"medianDurationS":23.707,"medianKills":0,"timeouts":0}
+{"timestamp":"2026-05-22T22:31:03.069Z","label":"realgame-v0-6-0-all","source":"realgame","runCount":15,"medianPeakLength":170,"medianPeakSct":12,"medianDurationS":26.401,"medianKills":0,"timeouts":0}
+{"timestamp":"2026-05-22T22:47:28.931Z","label":"realgame-v0-6-1-band","source":"realgame","runCount":15,"medianPeakLength":181,"medianPeakSct":12,"medianDurationS":28.405,"medianKills":0,"timeouts":0}
+{"timestamp":"2026-05-22T23:19:19.079Z","label":"realgame-v0-6-2-defaults","source":"realgame","runCount":15,"medianPeakLength":299,"medianPeakSct":20,"medianDurationS":26.4,"medianKills":0,"timeouts":0}
+{"timestamp":"2026-05-22T23:40:34.311Z","label":"realgame-v0-6-2-defaults-v2","source":"realgame","runCount":15,"medianPeakLength":126,"medianPeakSct":9,"medianDurationS":23.884,"medianKills":0,"timeouts":0}

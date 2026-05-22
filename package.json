@@ -1,6 +1,6 @@
 {
   "name": "nope-rope-9000",
-  "version": "0.5.2",
+  "version": "0.6.2",
   "private": true,
   "description": "Slither.io userscript bot. Sandbox + headless smoke tests via Playwright.",
   "scripts": {

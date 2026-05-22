@@ -28,9 +28,6 @@ blob-report/
 bench-results.json
 realgame-results.json
 
-# Per-run death screenshots (kept across batches, but not committed)
-play-deaths/
-
 # RL / ML artifacts
 *.pt
 *.pth
