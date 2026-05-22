@@ -1,0 +1,94 @@
+{
+  "timestamp": "2026-05-22T18:29:59.075Z",
+  "label": "first-test",
+  "source": "realgame",
+  "targetUrl": "https://slither.io",
+  "runCount": 2,
+  "medianPeakLength": 44,
+  "medianPeakSct": 23,
+  "medianDurationS": 90.021,
+  "medianKills": 0,
+  "timeouts": 1,
+  "runs": [
+    {
+      "startTime": 1779474484836,
+      "botEnabled": true,
+      "cfgSnapshot": {
+        "tickHz": 200,
+        "nickDefault": "nope-rope",
+        "foodSearchRadius": 1500,
+        "bucketCount": 16,
+        "projectFactor": 12,
+        "minScanRadius": 600,
+        "dangerRadius": 1.8,
+        "minDangerRadius": 30,
+        "headDangerMult": 3,
+        "warningMult": 2.5,
+        "fallbackRadius": 25,
+        "wallBuffer": 250,
+        "headLookaheadSeconds": [
+          0.1,
+          0.2,
+          0.35,
+          0.55,
+          0.8
+        ],
+        "minThreatSpeed": 30,
+        "headExtensionFactor": 4,
+        "autoNickPollMs": 500,
+        "runWidthWeight": 4,
+        "boostFoodSize": 25,
+        "boostClearanceMargin": 1.6,
+        "boostMaxAngleDelta": 1.5707963267948966,
+        "historyCap": 200,
+        "historyKey": "nr9k_history",
+        "overlayKey": "nr9k_overlay"
+      },
+      "peakLength": 28,
+      "peakSct": 5,
+      "lastSnapshot": {
+        "t": 1779474502799,
+        "xx": 35609.80852712577,
+        "yy": 38767.58092050247,
+        "length": 26,
+        "sct": 5,
+        "fam": 0.9741017803014386,
+        "kill_count": 0,
+        "sc": 1.028301886792453,
+        "ang": 0.07363107781851078,
+        "rank": 238,
+        "heading": 6.872233929727672,
+        "foodTargetXY": [
+          35265,
+          38646,
+          8.2
+        ],
+        "runLen": 11,
+        "allBlocked": false,
+        "ghosts": 0,
+        "snakeCount": 8,
+        "boosting": false
+      },
+      "endTime": 1779474502804,
+      "durationMs": 17968,
+      "_timedOut": false,
+      "wallSec": 17.978
+    },
+    {
+      "_timedOut": true,
+      "_noFinalizedRun": true,
+      "startTime": 1779474596045,
+      "peakLength": 44,
+      "peakSct": 23,
+      "lastSnapshot": {
+        "xx": 30862.20840503728,
+        "yy": 40104.177212750474,
+        "sct": 23,
+        "sc": 1.1981132075471699,
+        "kill_count": 0,
+        "fam": 0.8407226705981893
+      },
+      "wallSec": 90.021
+    }
+  ]
+}

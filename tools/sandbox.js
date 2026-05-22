@@ -8,6 +8,24 @@
 
   window.SANDBOX = true;
 
+  // Query params: ?seed=N for deterministic runs, ?autostart=1 to flip
+  // window.playing + enable the bot once it loads. Used by the Playwright
+  // smoke test in tests/; also handy for "open in a real browser to watch
+  // a fixed scenario" debugging.
+  const params = new URLSearchParams(window.location.search);
+  const seedParam = params.get('seed');
+  const autostart = params.get('autostart') === '1';
+  if (seedParam !== null) {
+    let state = (parseInt(seedParam, 10) >>> 0) || 1;
+    // mulberry32: small, fast, good enough for repeatable scenarios.
+    Math.random = function () {
+      state |= 0; state = (state + 0x6D2B79F5) | 0;
+      let t = Math.imul(state ^ (state >>> 15), 1 | state);
+      t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+  }
+
   const W = 4000, H = 4000;
   const FOOD_TARGET = 220;
   const DUMMY_COUNT = 4;
@@ -234,4 +252,43 @@
     requestAnimationFrame(tick);
   }
   requestAnimationFrame(tick);
+
+  // Autostart path. Wait for window.load so the bot's IIFE has run and
+  // window.nr9k is attached. A setTimeout(0) would race the network fetch
+  // of the bot script: the timer can fire between the two <script> tags
+  // (during the second tag's fetch) and find nr9k undefined.
+  if (autostart) {
+    function startWhenReady() {
+      window.playing = true;
+      if (window.nr9k && typeof window.nr9k.toggle === 'function') {
+        window.nr9k.toggle(true);
+      } else {
+        setTimeout(startWhenReady, 25);
+      }
+    }
+    if (document.readyState === 'complete') startWhenReady();
+    else window.addEventListener('load', startWhenReady);
+  }
+
+  // Lightweight test hook: anything that wants to read run state from
+  // outside (Playwright, the HUD, a sibling script) reads this. Kept tiny
+  // on purpose; per-test assertions can call page.evaluate for richer data.
+  window.__sandbox = {
+    ready: true,
+    seed: seedParam !== null ? Number(seedParam) : null,
+    autostart,
+    stats: function () {
+      return {
+        sct: player.sct,
+        length: player.pts.length,
+        x: player.xx,
+        y: player.yy,
+        ang: player.ang,
+        playing: !!window.playing,
+        botEnabled: !!(window.nr9k && window.nr9k.enabled && window.nr9k.enabled()),
+        foodCount: foods.length,
+        snakeCount: snakes.length,
+      };
+    },
+  };
 })();

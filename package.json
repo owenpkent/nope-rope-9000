@@ -1,0 +1,20 @@
+{
+  "name": "nope-rope-9000",
+  "version": "0.5.2",
+  "private": true,
+  "description": "Slither.io userscript bot. Sandbox + headless smoke tests via Playwright.",
+  "scripts": {
+    "test": "playwright test --project=smoke",
+    "test:unit": "node --test tests/unit/geometry.test.js tests/unit/sync-check.test.js",
+    "test:headed": "playwright test --project=smoke --headed",
+    "test:install": "playwright install chromium",
+    "bench": "playwright test --project=bench",
+    "bench:save": "node -e \"require('fs').copyFileSync('bench-results.json','bench-baseline.json'); console.log('saved bench-results.json -> bench-baseline.json');\"",
+    "bench:diff": "node tools/bench-diff.js",
+    "probe:realgame": "playwright test tests/probe-realgame.spec.js --project=realgame",
+    "play": "playwright test tests/play.spec.js --project=realgame"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.49.0"
+  }
+}
